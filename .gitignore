@@ -1,0 +1,8 @@
+build/
+target/
+dist/
+tools/
+migration-backup/
+.DS_Store
+*.dmg
+*.app/

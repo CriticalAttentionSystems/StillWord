@@ -1,0 +1,53 @@
+StillWord 1.0.0
+Developed by Veronique
+https://criticalattentionsystems.org
+Bugs and issues: criticalattentionsystems@gmail.com
+
+Choose the installer for your Mac:
+  AppleSilicon: Apple M-series processors.
+  Intel: Intel processors.
+These builds target macOS 13 Ventura or later. Older Macs or operating systems
+are not supported. Validation was performed on an Apple silicon Mac; the Intel
+launcher was also checked through Rosetta, not on physical Intel hardware.
+
+Installation
+1. Open the disk image.
+2. Drag StillWord into Applications.
+3. Eject the disk image and open StillWord from Applications.
+Java, yt-dlp, Node.js, and the Whisper speech engine are included.
+
+Release status
+These installers are NOT Developer ID signed or Apple notarized. They have
+local ad-hoc integrity signatures only. macOS may block a downloaded copy.
+A Developer ID signed, notarized release is required for normal public
+distribution. This build does not disable or change macOS security settings.
+
+Getting started
+Paste a public YouTube video link and click Get transcript. Caption access
+depends on YouTube and availability of English captions. Review automatic
+transcripts against the linked video before relying on them.
+
+Choose an AI option in the Summary panel. Browser subscriptions require you
+to copy the prepared prompt into that provider's website and paste its answer
+back. API providers require your own API credentials and may charge fees.
+Optional local AI and speech models are downloaded only when you select Set up.
+The speech model is about 1.6 GB; gpt-oss 20B is about 13 GB and needs substantial
+memory (about 16 GB). Optional model/runtime requirements can be stricter than
+the base app's requirements. Local Ollama setup requires macOS 14 Sonoma or later;
+Intel Macs run local inference on CPU. Internet access is required for video retrieval
+and initial model downloads.
+
+Installed model data is kept in your Library/Application Support/Stillword
+folder, outside the application bundle. No developer API keys, preferences,
+transcripts, or personal model files are included in these installers.
+
+Reporting a problem
+Open About and click Report a bug to prepare an email to Veronique.
+Copy bug report is available if no email application is configured.
+The template includes the app version, macOS version, processor architecture,
+and Java version. Add what happened, reproduction steps, and any error message.
+Review anything you attach; do not include API keys or private transcript text.
+
+Third-party notices and licenses are included inside StillWord.app under
+Contents/app/licenses and Contents/app/THIRD-PARTY-NOTICES.txt. Java's license
+files are in Contents/runtime/Contents/Home/legal.

@@ -1,0 +1,32 @@
+StillWord is developed by Veronique: https://criticalattentionsystems.org
+Support: criticalattentionsystems@gmail.com
+
+Eclipse Temurin / OpenJDK 17.0.20.1+1
+GPLv2 with the Classpath Exception. Java license notices are retained in the
+bundled runtime's legal directory.
+Project and source: https://github.com/adoptium/temurin17-binaries/releases/tag/jdk-17.0.20.1%2B1
+OpenJDK source: https://github.com/adoptium/jdk17u
+
+yt-dlp 2026.08.19
+The standalone macOS binary includes third-party components and is distributed
+as a GPLv3+ combined work. See licenses/yt-dlp-LICENSE and
+licenses/yt-dlp-THIRD_PARTY_LICENSES.txt for full terms and component notices.
+Release: https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19
+Source: https://github.com/yt-dlp/yt-dlp/tree/2026.08.19
+
+Node.js 22.23.3
+MIT license plus the bundled component licenses in licenses/node-LICENSE.
+Project and source: https://nodejs.org/en/download/archive/v22.23.3
+The exact pinned Node.js release and checksum are recorded in the native manifest.
+
+whisper.cpp 1.9.4
+MIT license. See tools/speech/WHISPER_LICENSE.
+Source: https://github.com/ggml-org/whisper.cpp/tree/v1.9.4
+Built as a universal Mac executable with static libraries, embedded Metal,
+GGML_NATIVE=OFF, GGML_BLAS=OFF, and a macOS 13.0 deployment target.
+The optional Whisper model is downloaded separately after user setup.
+
+Monastery watercolor: generated from a reference photograph of Bhavana
+Society's meditation hall. Reference and artwork history are retained in the
+application JAR's images/monastery-source.md. This independent application
+does not imply endorsement by Bhavana Society or its teachers.
