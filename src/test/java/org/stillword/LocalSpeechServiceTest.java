@@ -52,6 +52,8 @@ public final class LocalSpeechServiceTest {
             return;
         }
         successfulTranscription();
+        additionalAudioInputs();
+        directAudioDownloads();
         exactAudioSelection();
         validationAndReadiness();
         failedStages();
@@ -164,10 +166,124 @@ public final class LocalSpeechServiceTest {
         }
     }
 
+    private static void additionalAudioInputs() throws Exception {
+        equal(AudioInput.Kind.YOUTUBE, AudioInput.parse("youtu.be/dQw4w9WgXcQ").kind(), "YouTube input still canonicalized");
+        equal(AudioInput.Kind.AUDIO_PAGE, AudioInput.parse("https://any-publisher.example/talks/79412/").kind(), "generic audio page accepted");
+        equal(AudioInput.Kind.AUDIO_URL, AudioInput.parse("https://example.org/talk.MP3?token=a%2Fb#t=30").kind(), "audio extension ignores case");
+        equal("https://example.org/talk.MP3?token=a%2Fb", AudioInput.parse("https://example.org/talk.MP3?token=a%2Fb#t=30").value(), "signed query preserved without stale time fragment");
+        fails(IllegalArgumentException.class, () -> AudioInput.parse("https://name:secret@example.org/talk.mp3"), "embedded credentials rejected");
+        fails(IllegalArgumentException.class, () -> AudioInput.parse("ftp://example.org/talk.mp3"), "FTP rejected");
+        try (Fixture fixture = new Fixture()) {
+            Path source = fixture.root.resolve("A talk $(literal).unusual");
+            Files.writeString(source, "source audio fixture");
+            String original = Files.readString(source);
+            var input = AudioInput.parse(source.toString());
+            equal(AudioInput.Kind.AUDIO_FILE, input.kind(), "local file classified");
+            equal(source.toString(), AudioInput.parse(source.toUri().toString()).value(), "file URI classified");
+            var result = fixture.service().transcribe(source.toString(), "/not/a/downloader", null);
+            equal("A talk $(literal)", result.title(), "file title derived without shell interpretation");
+            equal(source.toUri().toString(), result.playbackSource(), "file playback retained outside working directory");
+            equal(original, Files.readString(source), "source file never altered or deleted");
+            check(!Files.exists(fixture.root.resolve("download.args")), "local file never requires downloader");
+            check(!Files.exists(Path.of(Files.readString(fixture.root.resolve("convert.cwd")).strip())), "local temporary recognition data removed");
+            equal(VttParser.parse(VTT), result.text(), "local audio receives full transcription pipeline");
+            fixture.recognizer("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nSelected words.\n");
+            var selected = fixture.service().transcribe(source.toString(), "", 60.0, 62.0, null);
+            equal(60.0, selected.cues().get(0).startSeconds(), "local-file selected range keeps original offset");
+            equal(62.0, selected.cues().get(0).endSeconds(), "local-file range ending respected");
+            fixture.script(fixture.convert, "convert", "echo corrupt >&2\nexit 1\n");
+            fails(IOException.class, () -> fixture.service().transcribe(source.toString(), "", null), "local malformed conversion fails");
+            equal(original, Files.readString(source), "failed conversion preserves original file");
+            Files.writeString(source, "");
+            fails(IllegalArgumentException.class, () -> AudioInput.parse(source.toString()), "empty local file rejected before processing");
+            Files.delete(source);
+            fails(IllegalArgumentException.class, () -> AudioInput.parse(source.toString()), "missing local file rejected");
+        }
+        var resolved = LocalSpeechService.resolveAudioPage(java.net.URI.create("https://publisher.example/episodes/42/"),
+                "<html><head><title>A &amp; B – Release</title></head><body>"
+                + "<audio controls src='/media/good.mp3'></audio>"
+                + "<a href='/media/other.mp3'>Other download</a></body></html>");
+        equal("https://publisher.example/media/good.mp3", resolved.uri().toString(), "explicit primary audio preferred over unrelated download");
+        equal("A & B – Release", resolved.title(), "HTML entities decoded in title");
+        equal("https://cdn.example/episode.m4a", LocalSpeechService.resolveAudioPage(java.net.URI.create("https://podcast.example/show/"),
+                "<audio><source src='https://cdn.example/episode.m4a' type='audio/mp4'></audio>").uri().toString(), "generic source element supports media CDN");
+        equal("https://audio.example/stream?id=1", LocalSpeechService.resolveAudioPage(java.net.URI.create("https://podcast.example/show/"),
+                "<meta property='og:audio' content='https://audio.example/stream?id=1'>").uri().toString(), "OpenGraph audio supports extensionless stream");
+        equal("https://publisher.example/media/good.mp3", LocalSpeechService.resolveAudioPage(java.net.URI.create("https://publisher.example/episodes/"),
+                "<a href='../media/good.mp3'>Download</a><a href='../media/good.mp3'>Listen</a>").uri().toString(), "relative download URL resolved and deduplicated");
+        fails(IOException.class, () -> LocalSpeechService.resolveAudioPage(java.net.URI.create("https://publisher.example/"),
+                "<a href='/first.mp3'>1</a><a href='/second.mp3'>2</a>"), "ambiguous multiple recordings rejected");
+        fails(IOException.class, () -> LocalSpeechService.resolveAudioPage(java.net.URI.create("https://publisher.example/"),
+                "<audio src='file:///private/secret.mp3'></audio><audio src='https://user:password@evil.example/a.mp3'></audio>"), "nonpublic schemes and embedded credentials rejected");
+    }
+
+    private static void directAudioDownloads() throws Exception {
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var executor = java.util.concurrent.Executors.newCachedThreadPool(task -> { Thread thread = new Thread(task); thread.setDaemon(true); return thread; });
+        server.setExecutor(executor);
+        java.util.concurrent.CountDownLatch stalled = new java.util.concurrent.CountDownLatch(1);
+        server.createContext("/", exchange -> {
+            try {
+                String path = exchange.getRequestURI().getPath();
+                if (path.equals("/stall.mp3")) {
+                    exchange.getResponseHeaders().set("Content-Type", "audio/mpeg");
+                    exchange.sendResponseHeaders(200, 0); exchange.getResponseBody().write(1); exchange.getResponseBody().flush();
+                    stalled.countDown();
+                    try { Thread.sleep(8000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    return;
+                }
+                if (path.equals("/redirect")) {
+                    exchange.getResponseHeaders().set("Location", "/nested/page"); exchange.sendResponseHeaders(302, -1); return;
+                }
+                if (path.equals("/nested/page")) {
+                    byte[] page = "<html><head><title>Generic publisher talk</title></head><body><audio><source src='../download.mp3' type='audio/mpeg'></audio></body></html>".getBytes(StandardCharsets.UTF_8);
+                    exchange.getResponseHeaders().set("Content-Type", "text/html"); exchange.sendResponseHeaders(200, page.length);
+                    exchange.getResponseBody().write(page); return;
+                }
+                if (path.equals("/big-page")) {
+                    exchange.getResponseHeaders().set("Content-Type", "text/html"); exchange.sendResponseHeaders(200, 3L * 1024 * 1024); return;
+                }
+                if (path.equals("/large.mp3")) { exchange.sendResponseHeaders(200, AudioInput.MAX_FILE_BYTES + 1); return; }
+                if (path.equals("/missing.mp3")) { exchange.sendResponseHeaders(404, -1); return; }
+                byte[] bytes = (path.equals("/page.mp3") ? "<html>Login</html>" : "downloaded audio fixture").getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", path.equals("/page.mp3") ? "text/html" : "audio/mpeg");
+                exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
+            } finally { exchange.close(); }
+        });
+        server.start();
+        String base = "http://127.0.0.1:" + server.getAddress().getPort();
+        try (Fixture fixture = new Fixture()) {
+            String link = base + "/download.mp3?token=abc%2Fdef";
+            var result = fixture.service().transcribe(link, "/missing/downloader", null);
+            equal(VttParser.parse(VTT), result.text(), "direct audio passes through converter and recognizer");
+            equal(link, result.playbackSource(), "original stable direct URL retained for playback");
+            var extensionless = fixture.service().transcribe(base + "/stream?id=42", "", null);
+            equal(VttParser.parse(VTT), extensionless.text(), "extensionless HTTP audio uses MIME rather than filename");
+            equal(base + "/stream?id=42", extensionless.playbackSource(), "extensionless playback URI retained");
+            var pageResult = fixture.service().transcribe(base + "/redirect", "", null);
+            equal("Generic publisher talk", pageResult.title(), "arbitrary publisher page title preserved");
+            equal(base + "/download.mp3", pageResult.playbackSource(), "relative source resolved against redirected page URL");
+            equal(VttParser.parse(VTT), pageResult.text(), "generic page audio passes through complete speech pipeline");
+            fails(IOException.class, () -> fixture.service().transcribe(base + "/big-page", "", null), "HTML size bounded separately from audio");
+            check(!Files.exists(fixture.root.resolve("download.args")), "direct audio does not depend on yt-dlp");
+            check(!Files.exists(Path.of(Files.readString(fixture.root.resolve("convert.cwd")).strip())), "downloaded audio cleaned up");
+            fails(IOException.class, () -> fixture.service().transcribe(base + "/page.mp3", "", null), "HTML disguised as audio rejected");
+            fails(IOException.class, () -> fixture.service().transcribe(base + "/large.mp3", "", null), "oversized download rejected from headers");
+            fails(IOException.class, () -> fixture.service().transcribe(base + "/missing.mp3", "", null), "HTTP failure surfaced");
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread worker = new Thread(() -> { try { fixture.service().transcribe(base + "/stall.mp3", "", null); } catch (Throwable e) { failure.set(e); } });
+            worker.start(); check(stalled.await(4, java.util.concurrent.TimeUnit.SECONDS), "streaming body began");
+            worker.interrupt(); worker.join(2500);
+            check(!worker.isAlive(), "audio download cancellation stops a stalled response");
+            check(failure.get() instanceof InterruptedException, "HTTP cancellation preserves interruption");
+            fails(IOException.class, () -> fixture.service(Duration.ofMillis(500)).transcribe(base + "/stall.mp3", "", null), "stalled body obeys overall download deadline");
+        } finally { server.stop(0); executor.shutdownNow(); }
+    }
+
     private static void validationAndReadiness() throws Exception {
         try (Fixture fixture = new Fixture()) {
             check(fixture.service().isReady(), "complete local runtime ready");
-            fails(IllegalArgumentException.class, () -> fixture.service().transcribe("https://evil.test/a", fixture.download.toString(), null), "unsupported URL rejected");
+            fails(IllegalArgumentException.class, () -> fixture.service().transcribe("ftp://evil.test/a", fixture.download.toString(), null), "unsupported URL rejected");
             fails(IllegalArgumentException.class, () -> fixture.service().transcribe(URL, fixture.download.toString(), 10.0, 9.0, null), "reversed range rejected");
             fails(IllegalArgumentException.class, () -> fixture.service().transcribe(URL, fixture.download.toString(), Double.NaN, null, null), "NaN range rejected");
             check(!Files.exists(fixture.root.resolve("download.args")), "validation precedes download");

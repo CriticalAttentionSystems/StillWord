@@ -16,6 +16,8 @@ import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
 import java.awt.geom.Rectangle2D;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,7 +36,7 @@ public final class VideoLinksTest {
 
     public static void main(String[] args) throws Exception {
         SwingUtilities.invokeAndWait(() -> {
-            try { run(); visibleLinksFollowEditing(); visibleLinkInterface(); }
+            try { run(); visibleLinksFollowEditing(); visibleLinkInterface(); audioLinksFollowEditing(); }
             catch (Exception exception) { throw new RuntimeException(exception); }
         });
         System.out.println("VideoLinksTest: " + checks + " checks passed");
@@ -47,7 +49,7 @@ public final class VideoLinksTest {
         equal(1, test.errors.size());
         equal(0, test.opened.size());
         equal("Copy", ((JMenuItem) test.transcript.getComponentPopupMenu().getComponent(0)).getText());
-        equal("Play video here", ((JMenuItem) test.transcript.getComponentPopupMenu().getComponent(2)).getText());
+        equal("Play recording here", ((JMenuItem) test.transcript.getComponentPopupMenu().getComponent(2)).getText());
 
         test.load();
         equal(true, test.links.hasSource());
@@ -185,7 +187,7 @@ public final class VideoLinksTest {
         test.mark("odd phrase");
         test.summary.setDocument(new PlainDocument());
         equal(0, test.links.linkedAmbiguityCount());
-        test.links.setSource("https://example.com/watch?v=5VDejFcm5_o", test.cues());
+        test.links.setSource("ftp://example.com/watch?v=5VDejFcm5_o", test.cues());
         equal(false, test.links.hasSource());
         test.links.setSource(URL, List.of(new VttParser.Cue(Double.NaN, 20, 0, 5),
                 new VttParser.Cue(0, 4, -1, 5), new VttParser.Cue(4, 2, 0, 5),
@@ -278,10 +280,10 @@ public final class VideoLinksTest {
         text.setCaretPosition(15);
         equal(true, play.isEnabled());
         equal(true, copy.isEnabled());
-        equal(true, play.getText().contains("Play video at 0:50"));
+        equal(true, play.getText().contains("Play recording at 0:50"));
         equal(URL + "&t=50s", play.getToolTipText());
         equal(URL + "&t=50s", copy.getToolTipText());
-        equal("Play video at 0:50", play.getAccessibleContext().getAccessibleName());
+        equal("Play recording at 0:50", play.getAccessibleContext().getAccessibleName());
         equal(true, excerpt.getText().contains("odd phrase"));
         field(app, "url", JTextField.class).setText("https://youtu.be/WPm4c0VDmW4");
         equal(URL + "&t=50s", play.getToolTipText()); // The loaded video's URL owns the link.
@@ -295,6 +297,65 @@ public final class VideoLinksTest {
         equal(false, play.isEnabled());
         equal(false, copy.isEnabled());
         equal(null, play.getToolTipText());
+    }
+
+    private static void audioLinksFollowEditing() throws Exception {
+        Harness test = new Harness();
+        test.transcript.setText(TEXT);
+        String remote = "https://media.example.org/stream/79412?download=1&format=audio";
+        test.links.setSource(remote + "#t=999", test.cues());
+        test.transcript.setCaretPosition(15);
+        equal(true, test.links.isAudioSource());
+        equal(URI.create(remote + "#t=50"), test.links.currentPlaybackLink().uri());
+        equal(50.4, test.links.currentPlaybackLink().startSeconds());
+        equal(58.0, test.links.currentPlaybackLink().endSeconds());
+        equal(0, test.opened.size());
+        test.links.playVisibleLink();
+        URI page = test.lastOpened();
+        equal("file", page.getScheme());
+        String player = Files.readString(Path.of(page));
+        equal(true, player.contains("requested=50"));
+        equal(true, player.contains("audio.currentTime="));
+        equal(true, player.contains("loadedmetadata"));
+        equal(true, player.contains("download=1&amp;format=audio"));
+        equal(false, player.contains("#t=999"));
+        Files.delete(Path.of(page));
+        test.mark("odd phrase");
+        equal(1, test.links.linkedAmbiguityCount());
+        test.links.playSummaryAt(8);
+        equal(true, Files.readString(Path.of(test.lastOpened())).contains("requested=50"));
+        Files.delete(Path.of(test.lastOpened()));
+        test.transcript.insert("Untimed introduction. ", 0);
+        test.transcript.setCaretPosition(test.transcript.getText().indexOf("odd") + 1);
+        equal(URI.create(remote + "#t=50"), test.links.currentPlaybackLink().uri());
+
+        Path local = Files.createTempFile("stillword-test audio ", ".unknown");
+        try {
+            Files.writeString(local, "source bytes must remain untouched");
+            test.transcript.setText(TEXT);
+            test.links.setSource(local.toUri().toString(), test.cues());
+            test.transcript.setCaretPosition(15);
+            equal(true, test.links.isAudioSource());
+            equal(URI.create(local.toUri() + "#t=50"), test.links.currentPlaybackLink().uri());
+            test.links.playVisibleLink();
+            player = Files.readString(Path.of(test.lastOpened()));
+            equal(true, player.contains(local.toUri().toASCIIString()));
+            equal(true, player.contains("requested=50"));
+            equal("source bytes must remain untouched", Files.readString(local));
+            Files.delete(Path.of(test.lastOpened()));
+        } finally { Files.deleteIfExists(local); }
+        test.links.setSource(local.toUri().toString(), test.cues());
+        equal(false, test.links.hasSource()); // Moving/deleting a source must not leave a false playable cue.
+        for (String invalid : List.of("javascript:alert(1)", "ftp://example.org/talk", "file://remote/share/talk.mp3",
+                "https://user:secret@example.org/talk.mp3", "data:audio/wav;base64,123")) {
+            test.links.setSource(invalid, test.cues());
+            equal(false, test.links.hasSource());
+            equal(false, test.links.isAudioSource());
+        }
+        test.load();
+        equal(false, test.links.isAudioSource());
+        test.links.playTranscriptAt(15);
+        equal(URI.create(URL + "&t=50s"), test.lastOpened()); // Switching back retains original YouTube links.
     }
 
     private static <T> T field(Object object, String name, Class<T> type) throws Exception {

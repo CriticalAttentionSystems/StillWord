@@ -9,6 +9,21 @@ import java.io.IOException;
 import java.io.FilterInputStream;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
+import java.io.StringReader;
+import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeoutException;
+import javax.swing.text.MutableAttributeSet;
+import javax.swing.text.html.HTML;
+import javax.swing.text.html.HTMLEditorKit;
+import javax.swing.text.html.parser.ParserDelegator;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -34,7 +49,9 @@ import javax.sound.sampled.AudioSystem;
 /** Downloads audio and transcribes it with a separate local Whisper model; no hosted AI API is used. */
 public final class LocalSpeechService {
     public static final String SOURCE_DESCRIPTION = "Whisper audio";
-    private static final long MAX_AUDIO_BYTES = 1_073_741_824L;
+    private static final long MAX_AUDIO_BYTES = AudioInput.MAX_FILE_BYTES;
+    private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20))
+            .followRedirects(HttpClient.Redirect.NORMAL).build();
     private static final long MAX_WAV_BYTES = 4_000_000_000L;
     private static final long MAX_VTT_BYTES = 32L * 1024 * 1024;
     private static final Pattern PERCENT = Pattern.compile("(?<![\\d.])(\\d{1,3}(?:\\.\\d+)?)%");
@@ -88,32 +105,65 @@ public final class LocalSpeechService {
         return transcribe(url, ytDlpExecutable, null, null, progress);
     }
 
-    /** Blocking; interrupt the worker to cancel. Recognition range times remain relative to the full video. */
+    /** Blocking; interrupt the worker to cancel. Recognition range times remain relative to the full recording. */
     public TranscriptService.Result transcribe(String url, String ytDlpExecutable, Double startSeconds,
                                                Double endSeconds, Consumer<String> progress) throws Exception {
-        String link = TranscriptService.validateUrl(url);
+        AudioInput input = AudioInput.parse(url);
+        String link = input.value();
         VttParser.validateRange(startSeconds, endSeconds);
         checkInterrupted();
         Status readiness = status();
         if (!readiness.ready()) throw new IOException(readiness.message());
-        String downloader = TranscriptService.resolveExecutable(ytDlpExecutable);
+
         Consumer<String> report = reporter(progress);
         Path working = Files.createTempDirectory("stillword-speech-");
         try {
-            Path audio = working.resolve("audio.m4a"), wav = working.resolve("audio.wav");
+            Path audio, wav = working.resolve("audio.wav");
             Path output = working.resolve("recognized"), vtt = working.resolve("recognized.vtt");
-            report.accept("Downloading the video's audio for local transcription…");
-            List<String> download = new ArrayList<>(List.of(downloader,
-                    "--ignore-config", "--no-plugin-dirs", "--no-playlist", "--no-simulate", "--no-cache-dir",
-                    "--newline", "--no-color", "--encoding", "utf-8", "--socket-timeout", "20",
-                    "--retries", "2", "--fragment-retries", "2", "--extractor-retries", "2",
-                    "--match-filters", "!is_live", "--max-filesize", "1G", "--fixup", "never",
-                    "-f", "bestaudio[ext=m4a][acodec^=mp4a]", "--print-to-file", "%(title)s", "title.txt",
-                    "-o", "audio.%(ext)s"));
-            TranscriptService.addBundledJavaScriptRuntime(download, downloader);
-            download.add("--"); download.add(link);
-            run(download, working, downloadTimeout, "Audio download", report);
-            requireOutput(audio, MAX_AUDIO_BYTES, "No AAC/m4a audio was downloaded. Use a completed public YouTube video with an available AAC audio track (maximum 1 GB).");
+            String title = input.title();
+            String playbackSource = link;
+            if (input.kind() == AudioInput.Kind.AUDIO_FILE) {
+                audio = Path.of(link);
+                playbackSource = audio.toUri().toString();
+                report.accept("Reading the selected audio file for local transcription…");
+                requireOutput(audio, MAX_AUDIO_BYTES, "The selected audio file is empty, unreadable, or larger than 1 GB.");
+            } else if (input.kind() == AudioInput.Kind.YOUTUBE) {
+                String downloader = TranscriptService.resolveExecutable(ytDlpExecutable);
+                audio = working.resolve("audio.m4a");
+                report.accept("Downloading the video's audio for local transcription…");
+                List<String> download = new ArrayList<>(List.of(downloader,
+                        "--ignore-config", "--no-plugin-dirs", "--no-playlist", "--no-simulate", "--no-cache-dir",
+                        "--newline", "--no-color", "--encoding", "utf-8", "--socket-timeout", "20",
+                        "--retries", "2", "--fragment-retries", "2", "--extractor-retries", "2",
+                        "--match-filters", "!is_live", "--max-filesize", "1G", "--fixup", "never",
+                        "-f", "bestaudio[ext=m4a][acodec^=mp4a]", "--print-to-file", "%(title)s", "title.txt",
+                        "-o", "audio.%(ext)s"));
+                TranscriptService.addBundledJavaScriptRuntime(download, downloader);
+                download.add("--"); download.add(link);
+                run(download, working, downloadTimeout, "Audio download", report);
+                requireOutput(audio, MAX_AUDIO_BYTES, "No AAC/m4a audio was downloaded. Use a completed public YouTube video with an available AAC audio track (maximum 1 GB).");
+                Path titleFile = working.resolve("title.txt");
+                if (Files.isRegularFile(titleFile, LinkOption.NOFOLLOW_LINKS) && Files.size(titleFile) <= 16_384) {
+                    String value = Files.readString(titleFile, StandardCharsets.UTF_8).strip().replaceAll("\\s+", " ");
+                    if (!value.isBlank()) title = value;
+                }
+            } else {
+                URI remote = URI.create(link);
+                audio = working.resolve("downloaded.audio");
+                report.accept("Downloading the audio source…");
+                Downloaded downloaded = download(remote, audio, MAX_AUDIO_BYTES, downloadTimeout,
+                        input.kind() == AudioInput.Kind.AUDIO_URL);
+                if (downloaded.html()) {
+                    report.accept("Finding the page’s audio recording…");
+                    ResolvedAudio resolved = resolveAudioPage(downloaded.uri(), Files.readString(audio, StandardCharsets.UTF_8));
+                    remote = resolved.uri(); title = resolved.title();
+                    audio = working.resolve("recording.audio");
+                    report.accept("Downloading the audio recording for local transcription…");
+                    download(remote, audio, MAX_AUDIO_BYTES, downloadTimeout, true);
+                }
+                playbackSource = remote.toString();
+                requireOutput(audio, MAX_AUDIO_BYTES, "No readable audio was downloaded (maximum 1 GB).");
+            }
             checkInterrupted();
             report.accept("Preparing 16 kHz mono audio on this Mac…");
             run(List.of(converter.toString(), "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
@@ -137,15 +187,152 @@ public final class LocalSpeechService {
             if (parsed.text().isBlank()) throw new IOException(startSeconds != null || endSeconds != null
                     ? "No readable speech was recognized in the selected time range. Check the times or select a longer passage."
                     : "No readable speech was recognized. The recording may contain silence or unclear audio.");
-            String title = "YouTube audio transcript";
-            Path titleFile = working.resolve("title.txt");
-            if (Files.isRegularFile(titleFile, LinkOption.NOFOLLOW_LINKS) && Files.size(titleFile) <= 16_384) {
-                String value = Files.readString(titleFile, StandardCharsets.UTF_8).strip().replaceAll("\\s+", " ");
-                if (!value.isBlank()) title = value;
-            }
             checkInterrupted();
-            return new TranscriptService.Result(title, parsed.text(), "en", parsed.cues(), SOURCE_DESCRIPTION);
+            return new TranscriptService.Result(title, parsed.text(), "en", parsed.cues(), SOURCE_DESCRIPTION, playbackSource);
         } finally { deleteTree(working); }
+    }
+
+    record ResolvedAudio(URI uri, String title) { }
+
+    /** Resolves standard embedded audio and download links without executing page scripts. */
+    static ResolvedAudio resolveAudioPage(URI page, String html) throws IOException {
+        List<URI> embedded = new ArrayList<>(), downloads = new ArrayList<>();
+        StringBuilder title = new StringBuilder();
+        HTMLEditorKit.ParserCallback callback = new HTMLEditorKit.ParserCallback() {
+            private boolean inTitle;
+            private void inspect(HTML.Tag tag, MutableAttributeSet attrs) {
+                String name = tag.toString();
+                if (name.equals("audio")) add(attrs.getAttribute(HTML.Attribute.SRC), embedded, false);
+                if (name.equals("source")) {
+                    Object type = attrs.getAttribute(HTML.Attribute.TYPE);
+                    add(attrs.getAttribute(HTML.Attribute.SRC), embedded, type == null || !type.toString().startsWith("audio/"));
+                }
+                if (tag == HTML.Tag.A) add(attrs.getAttribute(HTML.Attribute.HREF), downloads, true);
+                if (tag == HTML.Tag.META) {
+                    Object property = attrs.getAttribute("property");
+                    if (property == null) property = attrs.getAttribute(HTML.Attribute.NAME);
+                    if (property != null && (property.toString().equalsIgnoreCase("og:audio")
+                            || property.toString().equalsIgnoreCase("og:audio:url")
+                            || property.toString().equalsIgnoreCase("og:audio:secure_url")))
+                        add(attrs.getAttribute(HTML.Attribute.CONTENT), embedded, false);
+                }
+            }
+            private void add(Object value, List<URI> into, boolean requireExtension) {
+                if (value == null) return;
+                try {
+                    URI candidate = page.resolve(value.toString());
+                    if (("https".equalsIgnoreCase(candidate.getScheme()) || "http".equalsIgnoreCase(candidate.getScheme()))
+                            && candidate.getHost() != null && candidate.getRawUserInfo() == null
+                            && (!requireExtension || AudioInput.supportedName(candidate.getPath()))) {
+                        String withoutFragment = candidate.toString().split("#", 2)[0];
+                        into.add(URI.create(withoutFragment));
+                    }
+                } catch (IllegalArgumentException ignored) { }
+            }
+            @Override public void handleStartTag(HTML.Tag tag, MutableAttributeSet attrs, int pos) {
+                if (tag == HTML.Tag.TITLE) inTitle = true;
+                inspect(tag, attrs);
+            }
+            @Override public void handleSimpleTag(HTML.Tag tag, MutableAttributeSet attrs, int pos) { inspect(tag, attrs); }
+            @Override public void handleEndTag(HTML.Tag tag, int pos) { if (tag == HTML.Tag.TITLE) inTitle = false; }
+            @Override public void handleText(char[] text, int pos) { if (inTitle && title.length() < 16_384) title.append(text).append(' '); }
+        };
+        String document = Pattern.compile("(?i)<(?:html|head|body)\\b").matcher(html).find()
+                ? html : "<html><head>" + html + "</head><body></body></html>";
+        new ParserDelegator().parse(new StringReader(document), callback, true);
+        // Swing's HTML 3.2 parser drops unknown HTML5 tags before an implied body.
+        // A second body-scoped pass recovers audio/source tags in HTML fragments.
+        // The original pass retains the authoritative title and head metadata.
+        if (embedded.isEmpty() && Pattern.compile("(?i)<(?:audio|source)\\b").matcher(html).find()) {
+            String originalTitle = title.toString();
+            new ParserDelegator().parse(new StringReader("<html><body>" + html + "</body></html>"), callback, true);
+            if (!originalTitle.isBlank()) { title.setLength(0); title.append(originalTitle); }
+        }
+        List<URI> unique = (embedded.isEmpty() ? downloads : embedded).stream().distinct().toList();
+        if (unique.size() != 1) throw new IOException(unique.isEmpty()
+                ? "No audio recording was found in this page. Copy its audio Download link or download the recording and click Choose file. Pages requiring scripts or sign-in may not expose audio directly."
+                : "This page contains more than one audio recording. Copy the specific audio Download link or choose a downloaded file.");
+        String name = title.toString().strip().replaceAll("\\s+", " ");
+        if (name.isBlank()) name = "Audio transcript";
+        return new ResolvedAudio(unique.get(0), name);
+    }
+
+    record Downloaded(URI uri, boolean html) { }
+
+    /** A bounded asynchronous body keeps Cancel effective even while the remote server stalls. */
+    private static Downloaded download(URI uri, Path destination, long maximum, Duration timeout, boolean requireAudio) throws Exception {
+        checkInterrupted();
+        var html = new java.util.concurrent.atomic.AtomicBoolean();
+        HttpRequest request = HttpRequest.newBuilder(uri).timeout(timeout)
+                .header("User-Agent", "StillWord/1.0 (audio transcription)").GET().build();
+        var pending = HTTP.sendAsync(request, info -> {
+            if (info.statusCode() < 200 || info.statusCode() >= 300)
+                throw new UncheckedIOException(new IOException("Audio source returned HTTP " + info.statusCode() + ". Check that the link is publicly accessible."));
+            String contentType = info.headers().firstValue("Content-Type").orElse("").toLowerCase(Locale.ROOT);
+            html.set(contentType.contains("html"));
+            if (requireAudio && (contentType.startsWith("text/") || html.get() || contentType.contains("json")))
+                throw new UncheckedIOException(new IOException("The link returned a web page instead of audio. Use its audio download link or choose the downloaded file."));
+            long limit = html.get() ? Math.min(maximum, 2L * 1024 * 1024) : maximum;
+            if (info.headers().firstValueAsLong("Content-Length").orElse(0) > limit)
+                throw new UncheckedIOException(new IOException("The download exceeds the allowed size (" + limit / 1024 / 1024 + " MB)."));
+            return new LimitedFileSubscriber(destination, maximum, html, requireAudio);
+        });
+        long deadline = System.nanoTime() + timeout.toNanos();
+        try {
+            while (true) {
+                checkInterrupted();
+                if (System.nanoTime() >= deadline) throw new IOException("Audio download timed out. Check your connection and retry.");
+                try { var response = pending.get(250, TimeUnit.MILLISECONDS); return new Downloaded(response.uri(), html.get()); }
+                catch (TimeoutException ignored) { }
+                catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof UncheckedIOException io) throw io.getCause();
+                    if (cause instanceof IOException io) throw io;
+                    throw new IOException("Could not download the audio source: " + cause.getMessage(), cause);
+                }
+            }
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw e; }
+        finally { if (!pending.isDone()) pending.cancel(true); }
+    }
+
+    private static final class LimitedFileSubscriber implements HttpResponse.BodySubscriber<Path> {
+        private final HttpResponse.BodySubscriber<Path> output;
+        private final long maximum;
+        private final java.util.concurrent.atomic.AtomicBoolean html;
+        private final boolean requireAudio;
+        private final java.io.ByteArrayOutputStream prefix = new java.io.ByteArrayOutputStream();
+        private long bytes;
+        private Flow.Subscription subscription;
+        private boolean stopped;
+        LimitedFileSubscriber(Path file, long maximum, java.util.concurrent.atomic.AtomicBoolean html, boolean requireAudio) {
+            output = HttpResponse.BodySubscribers.ofFile(file);
+            this.maximum = maximum; this.html = html; this.requireAudio = requireAudio;
+        }
+        @Override public CompletionStage<Path> getBody() { return output.getBody(); }
+        @Override public void onSubscribe(Flow.Subscription value) { subscription = value; output.onSubscribe(value); }
+        @Override public void onNext(List<ByteBuffer> buffers) {
+            if (stopped) return;
+            for (ByteBuffer buffer : buffers) {
+                bytes += buffer.remaining();
+                if (prefix.size() < 512) {
+                    ByteBuffer copy = buffer.duplicate();
+                    byte[] leading = new byte[Math.min(512 - prefix.size(), copy.remaining())];
+                    copy.get(leading); prefix.writeBytes(leading);
+                }
+            }
+            String start = prefix.toString(StandardCharsets.UTF_8).stripLeading().toLowerCase(Locale.ROOT);
+            if (start.startsWith("<!doctype html") || start.startsWith("<html") || start.startsWith("<head")
+                    || start.startsWith("<body") || start.startsWith("<audio")) html.set(true);
+            long limit = html.get() ? Math.min(maximum, 2L * 1024 * 1024) : maximum;
+            if ((requireAudio && html.get()) || bytes > limit) {
+                stopped = true; subscription.cancel();
+                output.onError(new IOException(requireAudio && html.get()
+                        ? "The link returned HTML instead of audio. Use its audio download link."
+                        : "The download exceeded the maximum allowed size."));
+            } else output.onNext(buffers);
+        }
+        @Override public void onError(Throwable error) { stopped = true; output.onError(error); }
+        @Override public void onComplete() { if (!stopped) output.onComplete(); }
     }
 
     record Clip(double startSeconds, double endSeconds, long frameCount) { }
@@ -164,7 +351,7 @@ public final class LocalSpeechService {
             long available = input.getFrameLength();
             long start = (long) Math.ceil((from == null ? 0 : from) * 16_000);
             long end = to == null ? available : Math.min(available, (long) Math.floor(to * 16_000));
-            if (start >= end) throw new IOException("The selected time range contains no audio. Check the times against the video duration.");
+            if (start >= end) throw new IOException("The selected time range contains no audio. Check the times against the recording duration.");
             long remaining = start * 2;
             byte[] buffer = new byte[16_384];
             while (remaining > 0) {
@@ -312,7 +499,7 @@ public final class LocalSpeechService {
             process.getOutputStream().close();
             while (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
                 checkInterrupted();
-                if (System.nanoTime() >= deadline) throw new IOException(phase + " timed out. Try a shorter video or selected portion.");
+                if (System.nanoTime() >= deadline) throw new IOException(phase + " timed out. Try a shorter recording or selected portion.");
                 String progress = progressText(tail.text(), phase);
                 if (!progress.isBlank() && !progress.equals(previous)) { report.accept(progress); previous = progress; }
             }
@@ -344,7 +531,7 @@ public final class LocalSpeechService {
             else if (lower.contains("requested format") || lower.contains("no formats"))
                 message = "An AAC/m4a audio track was not available. Update yt-dlp or try another video.";
             else message += " Check the link and connection, and update yt-dlp if needed.";
-        } else if (phase.equals("Audio conversion")) message += " The downloaded audio may be unsupported or damaged.";
+        } else if (phase.equals("Audio conversion")) message += " The audio codec may be unsupported by this Mac or the recording may be damaged. Try exporting it as WAV, MP3, or M4A.";
         else if (phase.equals("Local speech recognition")) message += " Check the speech model and available memory; try a shorter portion.";
         String details = cleanOutput(output).strip();
         if (details.length() > 3000) details = details.substring(details.length() - 3000);

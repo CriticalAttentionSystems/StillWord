@@ -123,7 +123,9 @@ public final class LocalSummaryStreamTest {
         }
         try (Server server = fixed(FINISH)) { equal("", call(server, true, new ArrayList<>(), 1000, 3000), "empty excluded notes accepted when allowed"); }
         try (Server server = fixed(event(Map.of("content", "Partial"), "length") + "data: [DONE]\n\n")) {
-            check(failure(() -> call(server, true, new ArrayList<>(), 1000, 3000)).getMessage().contains("output limit"), "allowEmpty never accepts truncated output");
+            IOException exhausted = failure(() -> call(server, true, new ArrayList<>(), 1000, 3000));
+            check(exhausted instanceof LocalSummaryStream.OutputLimitException, "token limit has a distinct retryable type");
+            check(exhausted.getMessage().contains("output limit"), "allowEmpty never accepts truncated output");
         }
     }
 
@@ -141,8 +143,15 @@ public final class LocalSummaryStreamTest {
             IOException error = failure(() -> LocalSummaryStream.complete(CLIENT, server.uri(), key, Map.of(), null, "Test", false));
             check(error.getMessage().contains("Denied") && !error.getMessage().contains(key), "stream errors sanitized too");
         }
-        try (Server server = fixed("data: " + "x".repeat(1_048_600) + "\n\n")) {
+        try (Server server = fixed("data: " + "x".repeat(8 * 1_048_576 + 24) + "\n\n")) {
             check(failure(() -> call(server, false, new ArrayList<>(), 2000, 4000)).getMessage().contains("size limit"), "protocol data bounded before JSON parsing");
+        }
+        try (Server server = fixed(event(Map.of("reasoning", "hidden".repeat(1024)), null).repeat(200)
+                + event(Map.of("content", "Complete final answer."), null) + FINISH)) {
+            equal("Complete final answer.", call(server, false, new ArrayList<>(), 2000, 4000), "SSE overhead above 1 MiB is accepted without exposing reasoning");
+        }
+        try (Server server = fixed(event(Map.of("content", "ā".repeat(524_289)), null) + FINISH)) {
+            check(failure(() -> call(server, false, new ArrayList<>(), 2000, 4000)).getMessage().contains("answer size limit"), "final answer remains limited to 1 MiB of UTF-8 bytes");
         }
         try (Server server = new Server(exchange -> {
             open(exchange); exchange.getResponseBody().write(new byte[] {(byte) 0xc3, (byte) 0x28, '\n'});

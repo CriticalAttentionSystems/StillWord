@@ -29,10 +29,13 @@ import java.util.stream.Stream;
 
 /** Downloads caption files with a local yt-dlp installation; never downloads the video. */
 public final class TranscriptService {
-    public record Result(String title, String text, String language, List<VttParser.Cue> cues, String sourceDescription) {
+    public record Result(String title, String text, String language, List<VttParser.Cue> cues, String sourceDescription, String playbackSource) {
         public Result(String title, String text, String language) { this(title, text, language, List.of(), "Captions"); }
         public Result(String title, String text, String language, List<VttParser.Cue> cues) { this(title, text, language, cues, "Captions"); }
-        public Result { cues = List.copyOf(cues); }
+        public Result(String title, String text, String language, List<VttParser.Cue> cues, String sourceDescription) {
+            this(title, text, language, cues, sourceDescription, "");
+        }
+        public Result { cues = List.copyOf(cues); playbackSource = playbackSource == null ? "" : playbackSource; }
     }
 
     private static final Set<String> YOUTUBE_HOSTS = Set.of("youtube.com", "www.youtube.com", "m.youtube.com",

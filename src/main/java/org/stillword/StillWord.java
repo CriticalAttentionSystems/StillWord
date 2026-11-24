@@ -39,7 +39,7 @@ public final class StillWord {
     static final Font BODY = new Font("Avenir Next", Font.PLAIN, 13);
     private final AppSettings settings = new AppSettings();
     private JFrame frame;
-    private final JPanel root = new JPanel(new BorderLayout(0, 14));
+    private final JPanel root = new JPanel(new BorderLayout(0, 10));
     private final JTextField url = new LinkField();
     private final JCheckBox segment = new JCheckBox("Select a portion");
     private final JTextField start = field("00:00", 6), end = field("", 6);
@@ -47,13 +47,14 @@ public final class StillWord {
     private final HintArea summary = new HintArea("Your summary will appear here.\nAdd guidance below and create a summary with your selected AI.");
     private final HintArea guidance = new HintArea("e.g. Omit introductions, announcements and closing Q&A. Focus on practical teachings.");
     private final JLabel transcriptCount = label("0 words", 11, MUTED), summaryCount = label("0 words", 11, MUTED);
-    private final JLabel source = label("No video loaded", 12, MUTED), status = label("", 12, MUTED);
+    private final JLabel source = label("No recording loaded", 12, MUTED), status = label("", 12, MUTED);
     private final JLabel reviewHint = label(" ", 12, MUTED);
     private final JButton playbackLink = new JButton(), copyPlaybackLink = button("Copy link", false);
-    private final JLabel playbackExcerpt = label("Click any word to show its video link.", 11, MUTED);
+    private final JLabel playbackExcerpt = label("Click any word to show its playback link.", 11, MUTED);
     private final JComboBox<AiModelChoices.Choice> modelChoice = new JComboBox<>();
     private final JComboBox<SummaryStyle> summaryStyleChoice = new JComboBox<>(SummaryStyle.values());
     private final JComboBox<AppSettings.TranscriptMode> transcriptSource = new JComboBox<>(AppSettings.TranscriptMode.values());
+    private final JButton openAudio = button("Choose file…", false);
     private final JButton fetch = button("Get transcript", true), summarize = button("Summarize", true),
             saveTranscript = button("Save transcript…", false), saveSummary = button("Save summary…", false),
             cancel = button("Cancel", false), configure = button("AI & settings", false),
@@ -70,7 +71,7 @@ public final class StillWord {
     private SummaryStyle summaryStyleUsed = SummaryStyle.AUTO, browserStyle = SummaryStyle.AUTO;
     private String browserInput = "", browserGuidance = "", browserPrompt = "";
     private int sourceVersion, browserSourceVersion = -1;
-    private boolean changing, updatingModelChoices;
+    private boolean changing, updatingModelChoices, updatingTranscriptSource;
 
     public static void main(String[] args) throws Exception {
         System.setProperty("apple.laf.useScreenMenuBar", "true");
@@ -116,8 +117,8 @@ public final class StillWord {
 
     public StillWord() {
         root.setBackground(PAPER);
-        root.setBorder(new EmptyBorder(18, 28, 12, 28));
-        JPanel top = new JPanel(new BorderLayout(0, 14)) {
+        root.setBorder(new EmptyBorder(12, 28, 10, 28));
+        JPanel top = new JPanel(new BorderLayout(0, 8)) {
             @Override public Dimension getPreferredSize() {
                 // Recompute against the current root height even when this panel is already valid.
                 return getLayout().preferredLayoutSize(this);
@@ -136,15 +137,19 @@ public final class StillWord {
 
         configure.addActionListener(e -> settingsDialog());
         fetch.addActionListener(e -> fetchTranscript());
+        openAudio.addActionListener(e -> chooseAudio());
         url.addActionListener(e -> fetchTranscript());
         summarize.addActionListener(e -> summarize());
         localSetup.addActionListener(e -> setupLocalAi());
         speechSetup.addActionListener(e -> setupLocalSpeech());
         transcriptSource.setSelectedItem(settings.transcriptMode);
         transcriptSource.addActionListener(e -> {
-            settings.transcriptMode = selectedTranscriptMode(); settings.save();
-            updateTranscriptSource();
+            if (!updatingTranscriptSource && !isAudioInput()) {
+                settings.transcriptMode = selectedTranscriptMode(); settings.save();
+            }
+            if (!updatingTranscriptSource) updateTranscriptSource();
         });
+        watch(url, this::updateTranscriptSource);
         modelChoice.addActionListener(e -> selectModel());
         summaryStyleChoice.setSelectedItem(settings.summaryStyle);
         summaryStyleChoice.addActionListener(e -> {
@@ -169,15 +174,15 @@ public final class StillWord {
             if (link == null) return;
             try {
                 Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(link.uri().toString()), null);
-                status.setText("Video link copied · " + link.timestamp());
-            } catch (Exception exception) { error("Could not copy the video link. You can find the full address in the link's tooltip."); }
+                status.setText("Playback link copied · " + link.timestamp());
+            } catch (Exception exception) { error("Could not copy the playback link. You can find the full address in the link's tooltip."); }
         });
         transcript.getDocument().addDocumentListener(new DocumentListener() {
             public void insertUpdate(DocumentEvent e) { }
             public void changedUpdate(DocumentEvent e) { }
             public void removeUpdate(DocumentEvent e) {
                 if (!changing && transcript.getDocument().getLength() == 0) {
-                    transcriptProvenance = ""; source.setText("No video loaded"); source.setToolTipText(null);
+                    transcriptProvenance = ""; source.setText("No recording loaded"); source.setToolTipText(null);
                     sourceType = SummarySource.UNKNOWN;
                     sourceVersion++;
                 }
@@ -216,26 +221,29 @@ public final class StillWord {
 
     private JComponent inputCard() {
         RoundPanel card = new RoundPanel(WHITE, 18);
-        card.setLayout(new BorderLayout(0, 9)); card.setBorder(new EmptyBorder(12, 18, 12, 18));
-        card.add(label("START WITH A VIDEO", 10, MUTED), BorderLayout.NORTH);
+        card.setLayout(new BorderLayout(0, 6)); card.setBorder(new EmptyBorder(8, 18, 8, 18));
+        card.add(label("PASTE A YOUTUBE OR AUDIO LINK", 10, MUTED), BorderLayout.NORTH);
         JPanel line = transparent(new BorderLayout(12, 0));
-        url.setToolTipText("Paste a YouTube watch, share, Shorts, or live video link");
-        url.getAccessibleContext().setAccessibleName("YouTube video link");
-        line.add(url, BorderLayout.CENTER); line.add(fetch, BorderLayout.EAST); card.add(line, BorderLayout.CENTER);
+        url.setToolTipText("Paste a YouTube link, audio page, direct audio URL, or local audio file path");
+        url.getAccessibleContext().setAccessibleName("Video or audio source");
+        JPanel sourceActions = transparent(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        openAudio.setToolTipText("Choose an audio recording on this Mac; the audio decoder checks its format");
+        sourceActions.add(openAudio); sourceActions.add(fetch);
+        line.add(url, BorderLayout.CENTER); line.add(sourceActions, BorderLayout.EAST); card.add(line, BorderLayout.CENTER);
         JPanel range = transparent(new FlowLayout(FlowLayout.LEFT, 9, 0));
         segment.setOpaque(false); segment.setForeground(INK); segment.setFont(BODY);
         range.add(segment); range.add(label("From", 12, MUTED)); range.add(start);
         range.add(label("to", 12, MUTED)); range.add(end);
-        start.getAccessibleContext().setAccessibleName("Video segment start time");
-        end.getAccessibleContext().setAccessibleName("Video segment end time");
-        range.add(label("MM:SS or HH:MM:SS · blank end = video end", 11, MUTED));
+        start.getAccessibleContext().setAccessibleName("Recording segment start time");
+        end.getAccessibleContext().setAccessibleName("Recording segment end time");
+        range.add(label("MM:SS or HH:MM:SS · blank end = recording end", 11, MUTED));
         card.add(range, BorderLayout.SOUTH);
         return card;
     }
 
     private JComponent editorCard(boolean isSummary) {
         RoundPanel card = new RoundPanel(WHITE, 20);
-        card.setLayout(new BorderLayout(0, 12)); card.setBorder(new EmptyBorder(18, 20, 16, 20));
+        card.setLayout(new BorderLayout(0, 8)); card.setBorder(new EmptyBorder(12, 20, 12, 20));
         JPanel heading = transparent(new BorderLayout(0, 4));
         JPanel titleLine = transparent(new BorderLayout());
         titleLine.setPreferredSize(new Dimension(100, 28));
@@ -258,11 +266,11 @@ public final class StillWord {
         JScrollPane scroll = scroll(area); scroll.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, LINE));
         card.add(scroll, BorderLayout.CENTER);
 
-        JPanel bottom = transparent(new BorderLayout(0, 9));
+        JPanel bottom = transparent(new BorderLayout(0, 5));
         if (isSummary) {
             JPanel instructions = transparent(new BorderLayout(0, 5));
             instructions.add(label("SUMMARY GUIDANCE  ·  OPTIONAL", 10, MUTED), BorderLayout.NORTH);
-            guidance.setFont(BODY); guidance.setRows(2); guidance.setMargin(new Insets(8, 10, 8, 10));
+            guidance.setFont(BODY); guidance.setRows(2); guidance.setMargin(new Insets(4, 10, 4, 10));
             guidance.setBackground(new Color(242, 244, 236));
             guidance.getAccessibleContext().setAccessibleName("Summary guidance, topics to omit or emphasize");
             JScrollPane guidanceScroll = scroll(guidance);
@@ -284,7 +292,7 @@ public final class StillWord {
             instructions.add(aiLine, BorderLayout.SOUTH);
             bottom.add(instructions, BorderLayout.NORTH);
         } else {
-            JPanel speech = transparent(new BorderLayout(0, 6));
+            JPanel speech = transparent(new BorderLayout(0, 3));
             speech.add(label("TRANSCRIPT SOURCE", 10, MUTED), BorderLayout.NORTH);
             JPanel choices = transparent(new BorderLayout(8, 0));
             transcriptSource.setFont(BODY.deriveFont(11f)); transcriptSource.setForeground(INK);
@@ -293,7 +301,7 @@ public final class StillWord {
             speechSetup.setToolTipText("Install Whisper large-v3-turbo on this Mac. Separate 1.6 GB speech-model download; free to run.");
             choices.add(transcriptSource, BorderLayout.CENTER); choices.add(speechSetup, BorderLayout.EAST);
             speech.add(choices, BorderLayout.CENTER);
-            JPanel transcriptTools = transparent(new BorderLayout(0, 9));
+            JPanel transcriptTools = transparent(new BorderLayout(0, 5));
             transcriptTools.add(playbackPanel(), BorderLayout.NORTH);
             transcriptTools.add(speech, BorderLayout.SOUTH);
             bottom.add(transcriptTools, BorderLayout.NORTH);
@@ -306,6 +314,8 @@ public final class StillWord {
             buttons.add(actions, BorderLayout.WEST); buttons.add(saveSummary, BorderLayout.EAST);
         }
         else { buttons.add(playPassage, BorderLayout.WEST); buttons.add(saveTranscript, BorderLayout.EAST); }
+        for (JButton action : isSummary ? List.of(summarize, pasteSummary, saveSummary, localSetup)
+                : List.of(playPassage, saveTranscript, speechSetup)) action.setBorder(new EmptyBorder(7, 16, 7, 16));
         bottom.add(buttons, BorderLayout.SOUTH); card.add(bottom, BorderLayout.SOUTH);
         return card;
     }
@@ -313,16 +323,16 @@ public final class StillWord {
     private JComponent playbackPanel() {
         RoundPanel panel = new RoundPanel(new Color(239, 244, 234), 12);
         panel.setLayout(new BorderLayout(0, 3));
-        panel.setBorder(new EmptyBorder(8, 10, 8, 10));
-        panel.add(label("Click any word to show its video link.", 11, MUTED), BorderLayout.NORTH);
+        panel.setBorder(new EmptyBorder(6, 10, 6, 10));
+        panel.add(label("Click any word to show its playback link.", 11, MUTED), BorderLayout.NORTH);
         JPanel actions = transparent(new BorderLayout(8, 0));
         playbackLink.setFont(BODY.deriveFont(Font.BOLD, 12)); playbackLink.setForeground(INK);
         playbackLink.setHorizontalAlignment(SwingConstants.LEFT);
         playbackLink.setContentAreaFilled(false); playbackLink.setBorderPainted(false);
         playbackLink.setBorder(new EmptyBorder(3, 0, 3, 0));
         playbackLink.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        copyPlaybackLink.setFont(BODY.deriveFont(11f)); copyPlaybackLink.setBorder(new EmptyBorder(5, 9, 5, 9));
-        copyPlaybackLink.getAccessibleContext().setAccessibleName("Copy the selected passage's video link");
+        copyPlaybackLink.setFont(BODY.deriveFont(11f)); copyPlaybackLink.setBorder(new EmptyBorder(3, 9, 3, 9));
+        copyPlaybackLink.getAccessibleContext().setAccessibleName("Copy the selected passage's playback link");
         actions.add(playbackLink, BorderLayout.CENTER); actions.add(copyPlaybackLink, BorderLayout.EAST);
         panel.add(actions, BorderLayout.CENTER);
         playbackExcerpt.setPreferredSize(new Dimension(0, 16));
@@ -333,16 +343,16 @@ public final class StillWord {
 
     private void updatePlaybackLink(VideoLinks.PlaybackLink link) {
         boolean available = link != null && worker == null;
-        playbackLink.setText("<html><u>▶ Play video at " + (link == null ? "—" : link.timestamp()) + "</u></html>");
+        playbackLink.setText("<html><u>▶ Play recording at " + (link == null ? "—" : link.timestamp()) + "</u></html>");
         playbackLink.setEnabled(available); copyPlaybackLink.setEnabled(available);
         playbackLink.setCursor(Cursor.getPredefinedCursor(available ? Cursor.HAND_CURSOR : Cursor.DEFAULT_CURSOR));
         String address = link == null ? null : link.uri().toString();
         playbackLink.setToolTipText(address); copyPlaybackLink.setToolTipText(address);
-        playbackLink.getAccessibleContext().setAccessibleName(link == null ? "No video link for this text" : "Play video at " + link.timestamp());
+        playbackLink.getAccessibleContext().setAccessibleName(link == null ? "No playback link for this text" : "Play recording at " + link.timestamp());
         playbackLink.getAccessibleContext().setAccessibleDescription(address);
         playbackExcerpt.setText(link == null ? videoLinks != null && videoLinks.hasSource()
                 ? "This text has no timestamp. Click a word in the transcript."
-                : "Get a video transcript to attach playback times." : link.excerpt());
+                : "Get a transcript to attach playback times." : link.excerpt());
         playbackExcerpt.setToolTipText(link == null ? null : link.excerpt());
     }
 
@@ -356,7 +366,7 @@ public final class StillWord {
     }
 
     private void show() {
-        frame = new JFrame("Stillword — Transcript & reflection");
+        frame = new JFrame("Stillword — Video & audio transcripts");
         frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
         frame.setContentPane(root);
         frame.setMinimumSize(new Dimension(1030, 860));
@@ -389,14 +399,16 @@ public final class StillWord {
 
     private void fetchTranscript() {
         if (worker != null) return;
-        final String link; final Double from, to;
+        final String link; final AudioInput input; final Double from, to;
         try {
-            link = TranscriptService.validateUrl(url.getText());
+            input = AudioInput.parse(url.getText());
+            link = input.value();
             from = segment.isSelected() ? TextFiles.time(start.getText()) : null;
             to = segment.isSelected() ? TextFiles.time(end.getText()) : null;
             if (to != null && to <= (from == null ? 0 : from)) throw new IllegalArgumentException("The end time must be after the start time.");
         } catch (IllegalArgumentException e) { error(e.getMessage()); return; }
-        boolean audio = selectedTranscriptMode() == AppSettings.TranscriptMode.LOCAL_AUDIO;
+        boolean audio = input.isAudio() || selectedTranscriptMode() == AppSettings.TranscriptMode.LOCAL_AUDIO;
+        updateTranscriptSource();
         if (audio && !new LocalSpeechService().isReady()) {
             status.setText("Select Set up speech to install the free Whisper model, then get the transcript.");
             speechSetup.requestFocusInWindow(); return;
@@ -417,10 +429,10 @@ public final class StillWord {
                     transcriptProvenance = result.sourceDescription();
                     changing = true; transcript.setText(result.text()); transcript.setCaretPosition(0); changing = false;
                     clearUndo(transcript);
-                    videoLinks.setSource(link, result.cues());
+                    videoLinks.setSource(result.playbackSource().isBlank() ? link : result.playbackSource(), result.cues());
                     sourceVersion++;
                     updateReviewHint();
-                    String range = from == null && to == null ? "Full video" : "Selected portion";
+                    String range = from == null && to == null ? "Full recording" : "Selected portion";
                     source.setText(title); source.setToolTipText(title + " · " + range + " · " + result.sourceDescription() + " · " + result.language());
                     savedTranscript = "";
                     status.setText(range + " ready · " + result.sourceDescription() + ". Check unclear words with Play passage, then summarize.");
@@ -431,18 +443,41 @@ public final class StillWord {
         }, audio ? "Preparing audio transcription…" : "Getting captions…");
     }
 
+    private void chooseAudio() {
+        if (worker != null) return;
+        FileDialog dialog = new FileDialog(frame, "Open audio recording", FileDialog.LOAD);
+        dialog.setVisible(true);
+        if (dialog.getFile() == null) return;
+        Path chosen = Path.of(dialog.getDirectory(), dialog.getFile()).toAbsolutePath();
+        url.setText(chosen.toString());
+        updateTranscriptSource();
+        status.setText("Audio selected. Choose a portion if needed, then select Get transcript.");
+        url.setCaretPosition(0);
+    }
+
     private AppSettings.TranscriptMode selectedTranscriptMode() {
         return transcriptSource.getSelectedItem() instanceof AppSettings.TranscriptMode mode
                 ? mode : AppSettings.TranscriptMode.YOUTUBE_CAPTIONS;
     }
 
+    private boolean isAudioInput() {
+        try { return AudioInput.parse(url.getText()).isAudio(); }
+        catch (IllegalArgumentException exception) { return false; }
+    }
+
     private void updateTranscriptSource() {
-        boolean audio = selectedTranscriptMode() == AppSettings.TranscriptMode.LOCAL_AUDIO;
+        boolean audioInput = isAudioInput();
+        updatingTranscriptSource = true;
+        try {
+            transcriptSource.setSelectedItem(audioInput ? AppSettings.TranscriptMode.LOCAL_AUDIO : settings.transcriptMode);
+        } finally { updatingTranscriptSource = false; }
+        transcriptSource.setEnabled(worker == null && !audioInput);
+        boolean audio = audioInput || selectedTranscriptMode() == AppSettings.TranscriptMode.LOCAL_AUDIO;
         transcriptSource.setToolTipText(audio
-                ? "Whisper large-v3-turbo transcribes downloaded audio on this Mac. Pali and unclear speech still need review."
+                ? "Whisper large-v3-turbo transcribes audio files and recordings on this Mac. Pali and unclear speech still need review."
                 : "Download publisher captions when available, otherwise YouTube automatic captions.");
         speechSetup.setVisible(audio);
-        fetch.setToolTipText(audio ? "Download audio and transcribe with the separate local speech model"
+        fetch.setToolTipText(audio ? "Transcribe the recording with the separate local speech model"
                 : "Retrieve the video's English captions");
         root.revalidate(); root.repaint();
     }
@@ -454,10 +489,10 @@ public final class StillWord {
             protected void process(List<String> chunks) { if (worker == this) showProgress(chunks); }
             protected void done() {
                 try {
-                    get(); transcriptSource.setSelectedItem(AppSettings.TranscriptMode.LOCAL_AUDIO);
-                    settings.transcriptMode = AppSettings.TranscriptMode.LOCAL_AUDIO; settings.save();
+                    get();
+                    if (!isAudioInput()) { settings.transcriptMode = AppSettings.TranscriptMode.LOCAL_AUDIO; settings.save(); }
                     updateTranscriptSource();
-                    status.setText("Whisper large-v3-turbo is ready. Select Get transcript to transcribe the video's audio on this Mac.");
+                    status.setText("Whisper large-v3-turbo is ready. Select Get transcript to transcribe the recording on this Mac.");
                 } catch (Exception e) { workerFailure(e); }
                 finally { endWorker(); }
             }
@@ -494,7 +529,7 @@ public final class StillWord {
                     summaryStyleUsed = style;
                     summarySourceUsed = selectedSource;
                     status.setText(videoLinks.linkedAmbiguityCount() > 0
-                            ? "Summary ready. Click highlighted phrases to check the video; correct the transcript, then Redo summary."
+                            ? "Summary ready. Click highlighted phrases to check the recording; correct the transcript, then Redo summary."
                             : "Summary ready. You can correct the transcript and select Redo summary at any time.");
                 } catch (Exception e) { workerFailure(e); }
                 finally { endWorker(); }
@@ -696,7 +731,7 @@ public final class StillWord {
         if (videoLinks != null) { updateReviewHint(); updatePlaybackLink(videoLinks.currentPlaybackLink()); }
         fetch.setEnabled(idle); summarize.setEnabled(idle && !transcript.getText().isBlank());
         localSetup.setEnabled(idle); pasteSummary.setEnabled(idle); modelChoice.setEnabled(idle); summaryStyleChoice.setEnabled(idle);
-        speechSetup.setEnabled(idle); transcriptSource.setEnabled(idle);
+        speechSetup.setEnabled(idle); transcriptSource.setEnabled(idle && !isAudioInput()); openAudio.setEnabled(idle);
         saveTranscript.setEnabled(idle && !transcript.getText().isBlank()); saveSummary.setEnabled(idle && !summary.getText().isBlank());
     }
 
@@ -760,7 +795,7 @@ public final class StillWord {
         guidance.setText("Omit announcements and scheduling. Focus on practical guidance.");
         summary.setText("DEMONSTRATION SUMMARY — not generated by AI\n\nA gentle return to attention\n\nThe discussion presents meditation as a practice of noticing experience with patience. The breath offers a steady point of return without needing to be controlled or changed.\n\nA wandering mind is expected. Recognizing distraction and returning to the breath is itself a meaningful part of the practice. The emphasis is on a gentle, repeated return.\n\nThis approach extends into daily life. Walking, listening, and eating become opportunities to pause, notice intention, and act with care.");
         summaryInput = transcript.getText(); summaryGuidance = guidance.getText();
-        status.setText("Design preview · demonstration text only. Paste a video link to begin."); documentChanged();
+        status.setText("Design preview · demonstration text only. Paste a video or audio link to begin."); documentChanged();
     }
 
     private void error(String message) {
@@ -768,7 +803,7 @@ public final class StillWord {
         JOptionPane.showMessageDialog(frame, text, "Stillword", JOptionPane.ERROR_MESSAGE);
     }
     static int words(String text) { return text.isBlank() ? 0 : text.strip().split("\\s+").length; }
-    private static void watch(JTextArea area, Runnable action) {
+    private static void watch(JTextComponent area, Runnable action) {
         area.getDocument().addDocumentListener(new DocumentListener() {
             public void insertUpdate(DocumentEvent e) { action.run(); }
             public void removeUpdate(DocumentEvent e) { action.run(); }
@@ -869,7 +904,7 @@ public final class StillWord {
             super.paintComponent(g);
             if (getText().isEmpty() && !isFocusOwner()) {
                 Graphics2D g2 = (Graphics2D)g.create(); antialias(g2); g2.setFont(getFont()); g2.setColor(MUTED);
-                g2.drawString("Paste a YouTube video link…", getInsets().left, (getHeight() + g2.getFontMetrics().getAscent() - g2.getFontMetrics().getDescent()) / 2); g2.dispose();
+                g2.drawString("Paste a video or audio link, or open an audio file…", getInsets().left, (getHeight() + g2.getFontMetrics().getAscent() - g2.getFontMetrics().getDescent()) / 2); g2.dispose();
             }
         }
     }
@@ -883,9 +918,11 @@ public final class StillWord {
         @Override public Dimension getPreferredSize() {
             Insets insets = viewport.getInsets();
             int width = viewport.getWidth() - insets.left - insets.right;
-            // Keep the same composition as the window grows or shrinks, rather than
-            // changing the artwork's share of the banner with the window's height.
-            return new Dimension(900, Math.max(1, (int)Math.round((width > 0 ? width : 900) / 6.4)));
+            // Reserve more of the window for reading while scaling the entire painting together.
+            int availableHeight = viewport.getHeight() > 0 ? viewport.getHeight() : 960;
+            int height = (int) Math.round(Math.min((width > 0 ? width : 900) / 8.8,
+                    Math.max(100, availableHeight * .14)));
+            return new Dimension(900, Math.max(1, height));
         }
         protected void paintComponent(Graphics g) {
             Graphics2D g2 = (Graphics2D)g.create(); antialias(g2); int w = getWidth(), h = getHeight();

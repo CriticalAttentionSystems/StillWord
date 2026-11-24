@@ -37,6 +37,7 @@ public final class LocalSummaryWriterTest {
         rejectedOmissionRecovery();
         noPartialSummaryAfterEmptySection();
         recoveryFailuresAndCancellation();
+        outputLimitRecovery();
         failuresAndCancellation();
         plainTextAndMarkers();
         System.out.println("LocalSummaryWriterTest: " + checks + " checks passed.");
@@ -341,6 +342,51 @@ public final class LocalSummaryWriterTest {
                     }, ignored -> { }));
         } finally { Thread.interrupted(); }
         equal(1, beforeRecovery.get(), "interrupt after the empty first result prevents a recovery request");
+    }
+
+    private static void outputLimitRecovery() throws Exception {
+        List<Call> calls = new ArrayList<>();
+        List<String> progress = new ArrayList<>();
+        AtomicInteger second = new AtomicInteger();
+        String result = LocalSummaryWriter.summarize(SOURCE, GUIDANCE, SummaryStyle.AUTO, SummarySource.LECTURE,
+                (instruction, text, tokens, format, effort, phase) -> {
+                    if (format != null) return boundaries(text);
+                    calls.add(new Call(instruction, text, tokens, format, effort, phase));
+                    if (text.equals(SECOND) && second.incrementAndGet() == 1) throw new LocalSummaryStream.OutputLimitException();
+                    return text.equals(FIRST) ? "First complete answer." : text.equals(SECOND) ? "Second complete answer." : "Third complete answer.";
+                }, progress::add);
+        equal("First complete answer.\n\nSecond complete answer.\n\nThird complete answer.", result, "output-limit retry preserves section order without a partial answer");
+        equal(List.of(FIRST, SECOND, SECOND, THIRD), calls.stream().map(Call::source).toList(), "only the failed section is retried from exact original source");
+        equal(8192, calls.get(2).tokens(), "output-limit retry has larger bounded budget");
+        equal("low", calls.get(2).effort(), "output-limit retry reserves more budget for final answer");
+        for (Call call : calls) check(call.instruction().contains(GUIDANCE)
+                && call.instruction().contains(SummarySource.LECTURE.instructions())
+                && call.instruction().contains(SummaryStyle.AUTO.finalInstructions()), "retry retains guidance, lecture mode, and style");
+        check(progress.stream().anyMatch(value -> value.contains("Retrying section 2") && value.contains("larger output")), "recovery status identifies the exact section");
+        AtomicInteger exhausted = new AtomicInteger();
+        IOException error = failure(IOException.class, () -> LocalSummaryWriter.summarize(FIRST, GUIDANCE, SummaryStyle.AUTO,
+                (instruction, text, tokens, format, effort, phase) -> {
+                    if (format != null) return "{\"starts\":[]}";
+                    exhausted.incrementAndGet(); throw new LocalSummaryStream.OutputLimitException();
+                }, ignored -> { }));
+        equal(2, exhausted.get(), "persistent output limit retries at most once");
+        check(error.getMessage().contains("section 1") && error.getMessage().contains("no incomplete summary"), "persistent limit explains preserved transcript and rejected partial summary");
+        List<String> fallback = new ArrayList<>();
+        LocalSummaryWriter.summarize(SOURCE, GUIDANCE, SummaryStyle.AUTO,
+                (instruction, text, tokens, format, effort, phase) -> {
+                    if (format != null) throw new LocalSummaryStream.OutputLimitException();
+                    fallback.add(text); return "Complete bounded passage.";
+                }, ignored -> { });
+        equal(SOURCE, String.join("", fallback), "truncated boundary output falls back with exact complete source coverage");
+        AtomicInteger cancelled = new AtomicInteger();
+        try {
+            failure(InterruptedException.class, () -> LocalSummaryWriter.summarize(FIRST, GUIDANCE, SummaryStyle.AUTO,
+                    (instruction, text, tokens, format, effort, phase) -> {
+                        if (format != null) return "{\"starts\":[]}";
+                        cancelled.incrementAndGet(); Thread.currentThread().interrupt(); throw new LocalSummaryStream.OutputLimitException();
+                    }, ignored -> { }));
+        } finally { Thread.interrupted(); }
+        equal(1, cancelled.get(), "cancellation after output limit prevents retry");
     }
 
     private static void failuresAndCancellation() throws Exception {

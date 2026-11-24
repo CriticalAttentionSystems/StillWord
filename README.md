@@ -1,6 +1,6 @@
 # StillWord
 
-A Java desktop app for reading, editing, and saving YouTube transcripts and AI summaries. The interface features a watercolor of Bhavana Society's main meditation hall, with editable **Transcript** and **Summary** panels.
+A Java desktop app for reading, editing, and saving transcripts and AI summaries from YouTube and audio recordings. The interface features a watercolor of Bhavana Society's main meditation hall, with editable **Transcript** and **Summary** panels.
 
 **Run on this Mac**
 
@@ -13,7 +13,7 @@ mvn clean package
 java -jar target/StillWord.jar
 ```
 
-`mvn test` runs all fifteen offline regression suites. `mvn exec:java` also opens the app. To package without running tests, use `mvn -DskipTests package`. Build plugins may need an internet connection on their first Maven use. The shell commands below remain available if you prefer to build with the JDK alone.
+`mvn test` runs all sixteen offline regression suites. `mvn exec:java` also opens the app. To package without running tests, use `mvn -DskipTests package`. Build plugins may need an internet connection on their first Maven use. The shell commands below remain available if you prefer to build with the JDK alone.
 
 The port includes the existing locally installed caption, AI, and speech tools under the Git-ignored `tools` directory. These are development runtime files, not Java source or distributable bundles. Your original source project and existing installed/preview app remain separate; rebuilding this project creates a new JAR. DMG packaging remains a later step.
 
@@ -65,6 +65,16 @@ The verified engine and model stay under `tools/speech`; setup reuses valid exis
 
 Whisper can still mishear accents, names, and Pali words or produce text during silence. Click an unclear word and use its displayed video link, correct the transcript, and then **Redo summary**. Neither a cleaner-looking transcript nor a different summary style establishes that the words are accurate. An initial full local-audio test of the requested Q&A produced 4,237 words in about 9 minutes 34 seconds, but its last cue ran approximately 15 seconds past the selected endpoint. The app now clips the actual audio before recognition; a new 45:30–47:21.8 test ended at the requested time and excluded the closing announcement. Several Pali-related phrases improved, but garbled opening words and hallucinated repetitions remain; this is not an accuracy acceptance pass. See [speech setup implementation notes](docs/DEVELOPMENT.md#local-speech-recognition) and the [official whisper.cpp project](https://github.com/ggml-org/whisper.cpp/tree/v1.9.4).
 
+**Audio files and links**
+
+The existing YouTube captions and YouTube Whisper workflows remain available. Paste a YouTube video link as before. Switching to audio does not change your preferred YouTube transcript source.
+
+For audio, paste a direct HTTP(S) audio link or the web page containing its recording, then select **Get transcript**. There is no website whitelist. StillWord follows standard embedded audio and audio download links without running page scripts; extensionless and signed download URLs are accepted. When a page exposes several recordings, choose the specific recording's download link instead. Pages that expose audio only after sign-in or through scripts may require downloading the recording yourself.
+
+Use **Choose file…** to choose a local recording. Files are recognized by their actual contents, not restricted by filename extension. Whisper runs locally after the existing one-time speech setup. The macOS audio decoder supports common formats such as MP3, AAC/M4A, WAV, AIFF, FLAC, and Ogg/Opus on supported macOS versions. An unsupported, corrupt, encrypted, or protected recording produces an error; selecting a file does not guarantee its codec can be decoded. Audio is limited to 1 GB, converted PCM to 4 GB, and recognition remains English as in the existing workflow. Local originals are never edited or deleted.
+
+The same time-range controls, editable transcript/summary panels, summary styles, guidance, redo, and save dialogs work with audio. Clicking transcript text reveals its source time. **Play passage** opens audio in a small browser player at that cue; **Copy link** copies the original media URL with its time fragment. For a local file, the link refers to that file on your Mac. Browser format support and autoplay policies vary, so the player includes an explicit play-from-time button and an original-source fallback.
+
 **Choose how to summarize**
 
 Use the model dropdown in the **Summary** panel:
@@ -97,8 +107,8 @@ API keys stay in memory for the current app session. For the standard OpenAI end
 
 **Data and limitations**
 
-- Transcript extraction contacts YouTube through yt-dlp. Caption mode downloads English subtitles and metadata; local speech mode downloads audio even when English captions are absent, then recognizes it on your Mac. Temporary media, captions, and diagnostic files are cleaned up after the operation. Neither mode guarantees accurate wording. Sign-in-restricted videos are unsupported. Existing yt-dlp configuration and plugins are deliberately ignored.
-- Clicking or selecting any timed transcript word reveals a visible video link and copy action. Playback uses the retained caption or speech cue start, rounded down to the whole second in the YouTube URL; it is not word-level audio alignment. Timestamp offsets follow ordinary edits within the loaded transcript; a newly pasted transcript has no attached timing data. Gold review phrases require an exact match to timed source text and are suggestions rather than a complete error check. Opening a link does not guarantee that the browser will start playback automatically.
+- YouTube transcript extraction contacts YouTube through yt-dlp. Caption mode downloads English subtitles and metadata; local speech mode downloads audio even when English captions are absent, then recognizes it on your Mac. Temporary media, captions, and diagnostic files are cleaned up after the operation. Neither mode guarantees accurate wording. Sign-in-restricted videos are unsupported. Existing yt-dlp configuration and plugins are deliberately ignored.
+- Clicking or selecting any timed transcript word reveals a visible video link and copy action. Playback uses the retained caption or speech cue start, rounded down to the whole second in the YouTube URL (audio links use a media time fragment); it is not word-level audio alignment. Timestamp offsets follow ordinary edits within the loaded transcript; a newly pasted transcript has no attached timing data. Gold review phrases require an exact match to timed source text and are suggestions rather than a complete error check. Opening a link does not guarantee that the browser will start playback automatically.
 - In local/API mode, **Summarize** sends the current transcript and your guidance to the indicated endpoint. Long transcripts require multiple requests. No transcript is sent on launch, when selecting a model, while editing, or while saving. **Set up** downloads software/model files and checks local model readiness. Local summarization uses your Mac's server.
 - In subscription mode, **Prepare prompt** builds the prompt locally. The copy buttons put it on the system clipboard. Opening a website does not attach the transcript to its URL; you submit the prompt yourself. **Paste summary** reads the answer you copied, and the result remains editable.
 - AI mode, endpoints, models, protocol, website, transcript source, summary style, caption language, executable path, and last save directory are stored in Java Preferences. API keys, transcripts, summaries, and guidance are not stored there. Text files are written only when you choose a save button; Copy link and browser handoff also use the clipboard. Closing the app discards unsaved panel text.

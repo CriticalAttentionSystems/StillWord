@@ -35,7 +35,15 @@ import java.util.function.Consumer;
 
 /** Bounded OpenAI-compatible SSE transport for local summary requests. */
 final class LocalSummaryStream {
-    private static final int MAX_BYTES = 1_048_576;
+    private static final int MAX_ANSWER_BYTES = 1_048_576;
+    private static final int MAX_WIRE_BYTES = 8 * 1_048_576;
+
+    /** A complete protocol response that explicitly reports exhausted generation tokens. */
+    static final class OutputLimitException extends IOException {
+        OutputLimitException() {
+            super("The local AI reached its output limit. No truncated summary was accepted.");
+        }
+    }
     private LocalSummaryStream() { }
 
     static String complete(HttpClient client, URI uri, String apiKey, Map<String, Object> requestBody,
@@ -77,6 +85,7 @@ final class LocalSummaryStream {
             boolean successful = response.statusCode() >= 200 && response.statusCode() < 300;
             StringBuilder errorBody = new StringBuilder(), event = new StringBuilder(), answer = new StringBuilder();
             boolean finished = false;
+            int answerBytes = 0;
             while (true) {
                 clock.poll();
                 Read next = reads.poll(100, TimeUnit.MILLISECONDS);
@@ -123,11 +132,12 @@ final class LocalSummaryStream {
                     int reasoning = stringField(delta, "reasoning").length() + stringField(delta, "reasoning_content").length();
                     if (!content.isEmpty() || reasoning > 0) clock.receivedContent = true;
                     if (finished && (!content.isEmpty() || reasoning > 0)) throw malformed();
+                    answerBytes += content.getBytes(StandardCharsets.UTF_8).length;
+                    if (answerBytes > MAX_ANSWER_BYTES) throw new IOException("The local AI summary exceeded the 1 MiB answer size limit.");
                     answer.append(content);
-                    if (answer.length() > MAX_BYTES) throw new IOException("The local AI summary exceeded the response size limit.");
                     Object reason = choice.get("finish_reason");
                     if (reason != null) {
-                        if (reason.equals("length")) throw new IOException("The local AI reached its output limit. No truncated summary was accepted.");
+                        if (reason.equals("length")) throw new OutputLimitException();
                         if (!reason.equals("stop")) throw new IOException("The local AI could not complete this summary (finish status: " + safe(String.valueOf(reason), apiKey) + ").");
                         finished = true;
                     }
@@ -168,7 +178,7 @@ final class LocalSummaryStream {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FilterInputStream(source) {
             private int count;
             private void count(int amount) throws IOException {
-                if (amount > 0 && (count += amount) > MAX_BYTES) throw new IOException("Response exceeded the 1 MiB size limit.");
+                if (amount > 0 && (count += amount) > MAX_WIRE_BYTES) throw new IOException("Response exceeded the 8 MiB stream size limit.");
             }
             @Override public int read() throws IOException { int value = in.read(); count(value < 0 ? 0 : 1); return value; }
             @Override public int read(byte[] bytes, int offset, int length) throws IOException {

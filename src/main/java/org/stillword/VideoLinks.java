@@ -18,6 +18,10 @@ import java.awt.Desktop;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -61,6 +65,7 @@ public final class VideoLinks {
     private Document transcriptDocument;
     private Document summaryDocument;
     private String sourceUrl;
+    private boolean audioSource;
     private int previousTranscriptLength;
     private int previousSummaryLength;
     private int popupOffset = -1;
@@ -82,7 +87,7 @@ public final class VideoLinks {
         this.showError = showError == null ? ignored -> { } : showError;
         this.opener = Objects.requireNonNull(opener);
         this.chooser = chooser == null ? choices -> (Playback) JOptionPane.showInputDialog(summary,
-                "This phrase occurs more than once. Choose the passage to hear.", "Choose video passage",
+                "This phrase occurs more than once. Choose the passage to hear.", "Choose recording passage",
                 JOptionPane.QUESTION_MESSAGE, null, choices.toArray(), choices.get(0)) : chooser;
         originalSummaryTooltip = summary.getToolTipText();
         originalTranscriptTooltip = transcript.getToolTipText();
@@ -108,12 +113,17 @@ public final class VideoLinks {
         transcript.addCaretListener(event -> refreshSelectionLink());
     }
 
-    /** Call after replacing transcript text. The loaded video's URL is independent of any URL field. */
+    /** Call after replacing transcript text. The loaded recording URI is independent of any input field. */
     public void setSource(String videoUrl, List<VttParser.Cue> timings) {
         invalidateSource();
         if (videoUrl == null || videoUrl.isBlank()) return;
         try {
-            String canonical = TranscriptService.validateUrl(videoUrl);
+            String canonical;
+            try { canonical = TranscriptService.validateUrl(videoUrl); }
+            catch (IllegalArgumentException notYouTube) {
+                canonical = audioSourceUri(videoUrl).toString();
+                audioSource = true;
+            }
             if (timings != null) for (VttParser.Cue cue : timings) {
                 if (cue == null || !Double.isFinite(cue.startSeconds()) || !Double.isFinite(cue.endSeconds())
                         || cue.startSeconds() < 0 || cue.endSeconds() < cue.startSeconds()
@@ -124,12 +134,12 @@ public final class VideoLinks {
             cues.sort(Comparator.comparingInt(cue -> cue.start.getOffset()));
             sourceUrl = canonical;
             previousTranscriptLength = transcriptDocument.getLength();
-            transcript.setToolTipText(hasSource() ? "Click any word to show its video link."
+            transcript.setToolTipText(hasSource() ? "Click any word to show its recording link."
                     : originalTranscriptTooltip);
             refreshSelectionLink();
         } catch (IllegalArgumentException | BadLocationException exception) {
             invalidateSource();
-            showError.accept("Video links could not be attached. Retrieve the transcript again from a valid YouTube link.");
+            showError.accept("Playback links could not be attached. Retrieve the transcript again from a valid recording link or audio file.");
         }
     }
 
@@ -162,6 +172,8 @@ public final class VideoLinks {
 
     public int linkedAmbiguityCount() { return marks.size(); }
 
+    public boolean isAudioSource() { return audioSource && hasSource(); }
+
     /** Updates whenever an ordinary caret/selection change chooses a timed passage. Null means untimed text. */
     public void setPlaybackLinkListener(Consumer<PlaybackLink> listener) {
         playbackLinkListener = listener == null ? ignored -> { } : listener;
@@ -180,7 +192,7 @@ public final class VideoLinks {
         return link(cueAt(start));
     }
 
-    /** Opens only the link currently displayed to the user. */
+    /** Plays only the source passage currently displayed to the user. Audio opens in a local browser player. */
     public void playVisibleLink() {
         if (visibleLink != null && hasSource()) open(visibleLink.uri());
     }
@@ -194,11 +206,11 @@ public final class VideoLinks {
 
     void playTranscriptAt(int offset) {
         if (!hasSource()) {
-            showError.accept("Retrieve a video transcript first to attach playback times. Pasted text has no video timing.");
+            showError.accept("Retrieve a recording transcript first to attach playback times. Pasted text has no attached timing.");
             return;
         }
         TimedSpan cue = cueAt(offset);
-        if (cue == null) showError.accept("Select a word from the retrieved captions, then choose Play video here.");
+        if (cue == null) showError.accept("Select a word from the retrieved transcript, then choose Play recording here.");
         else {
             PlaybackLink selected = link(cue);
             showLink(selected);
@@ -227,16 +239,76 @@ public final class VideoLinks {
 
     private void open(URI uri) {
         if (!hasSource()) return;
-        try { opener.open(uri); }
+        try { opener.open(audioSource ? audioPlayerPage(uri) : uri); }
         catch (Exception exception) {
-            showError.accept("Could not open your browser. Open this video address manually: " + uri);
+            showError.accept("Could not open your browser. Open this recording address manually: " + uri);
         }
     }
 
     private PlaybackLink link(TimedSpan cue) {
         if (!hasSource() || cue == null || !cue.valid()) return null;
-        return new PlaybackLink(URI.create(sourceUrl + "&t=" + (long) Math.floor(cue.seconds) + "s"),
+        return new PlaybackLink(URI.create(sourceUrl + (audioSource ? "#t=" : "&t=")
+                        + (long) Math.floor(cue.seconds) + (audioSource ? "" : "s")),
                 cue.seconds, cue.endSeconds, excerpt(cue.start.getOffset(), cue.end.getOffset()));
+    }
+
+    /** Accepts media already resolved by transcription, including signed and extensionless URLs. */
+    static URI audioSourceUri(String source) {
+        try {
+            URI uri = URI.create(source.strip());
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
+            boolean local = scheme.equals("file");
+            if ((!local && !scheme.equals("http") && !scheme.equals("https"))
+                    || uri.getRawUserInfo() != null || uri.isOpaque()
+                    || (!local && (uri.getHost() == null || uri.getHost().isBlank()))
+                    || (local && uri.getRawAuthority() != null && !uri.getRawAuthority().isBlank()))
+                throw new IllegalArgumentException("Use a direct audio URL or a local audio file URI.");
+            // A previously supplied time fragment must never override the verified cue time.
+            String raw = uri.toString();
+            URI clean = URI.create(raw.split("#", 2)[0]);
+            if (local && (!Files.isRegularFile(Path.of(clean)) || !Files.isReadable(Path.of(clean))))
+                throw new IllegalArgumentException("The local audio file is no longer readable.");
+            return clean;
+        } catch (RuntimeException exception) {
+            throw new IllegalArgumentException("Use a readable audio file or a direct audio URL.", exception);
+        }
+    }
+
+    /** Opens local and remote audio in the browser with an explicit seek, not an external player that may ignore #t. */
+    static URI audioPlayerPage(URI timedUri) throws IOException {
+        URI media = audioSourceUri(timedUri.toString());
+        String fragment = timedUri.getFragment();
+        if (fragment == null || !fragment.matches("t=[0-9]+")) throw new IllegalArgumentException("Missing audio cue time.");
+        long seconds = Long.parseLong(fragment.substring(2));
+        String time = timestamp(seconds);
+        String html = """
+                <!doctype html><html lang="en"><meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <title>StillWord · Listen at %s</title>
+                <style>body{background:#f6f3e9;color:#254638;font:18px Georgia,serif;max-width:680px;margin:12vh auto;padding:28px}h1{font-size:30px;font-weight:normal}audio{width:100%%;margin:20px 0}button{background:#315541;color:#fff;border:0;border-radius:7px;padding:12px 18px;font-size:15px;cursor:pointer}p{line-height:1.5}a{color:#315541;overflow-wrap:anywhere}</style>
+                <h1>Listen to the original passage</h1><p>Selected transcript time: <strong>%s</strong></p>
+                <audio id="recording" controls preload="metadata" src="%s"></audio>
+                <p><button id="replay">Play from %s</button></p><p id="status" role="status">Loading the recording…</p>
+                <p><a href="%s">Open the original audio</a></p>
+                <script>
+                const audio=document.getElementById('recording'),status=document.getElementById('status'),requested=%d;
+                let positioned=false;
+                function seek(){if(positioned||audio.readyState<1)return;try{audio.currentTime=Math.min(requested,Number.isFinite(audio.duration)?audio.duration:requested);positioned=true;status.textContent='Ready. Press Play to listen.';}catch(error){status.textContent='Use the player controls to seek to %s.';}}
+                audio.addEventListener('loadedmetadata',seek);audio.addEventListener('canplay',seek);
+                document.getElementById('replay').addEventListener('click',()=>{positioned=false;seek();audio.play().catch(()=>{status.textContent='Press Play in the audio controls to listen.';});});
+                audio.addEventListener('error',()=>{status.textContent='This browser could not play the recording. Open the original audio above and seek to %s.';});
+                </script></html>
+                """.formatted(time, time, htmlEscape(media.toASCIIString()), time,
+                        htmlEscape(timedUri.toASCIIString()), seconds, time, time);
+        Path page = Files.createTempFile("stillword-audio-player-", ".html");
+        page.toFile().deleteOnExit();
+        Files.writeString(page, html, StandardCharsets.UTF_8);
+        return page.toUri();
+    }
+
+    private static String htmlEscape(String text) {
+        return text.replace("&", "&amp;").replace("\"", "&quot;")
+                .replace("<", "&lt;").replace(">", "&gt;").replace("'", "&#39;");
     }
 
     private void refreshSelectionLink() { showLink(transcriptSelectionLink()); }
@@ -282,6 +354,7 @@ public final class VideoLinks {
 
     private void invalidateSource() {
         sourceUrl = null;
+        audioSource = false;
         cues.clear();
         showLink(null);
         clearSummaryMarks();
@@ -379,7 +452,7 @@ public final class VideoLinks {
                 List<Playback> matches = matches(span.phrase);
                 if (matches.isEmpty()) { resetSummaryPointer(); return; }
                 summary.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-                summary.setToolTipText(matches.size() == 1 ? "Hear the original caption at " + timestamp(matches.get(0).seconds())
+                summary.setToolTipText(matches.size() == 1 ? "Hear the original recording at " + timestamp(matches.get(0).seconds())
                         : "Matches at " + String.join(", ", matches.stream().limit(4)
                                 .map(match -> timestamp(match.seconds())).toList())
                                 + (matches.size() > 4 ? ", …" : "") + " — click to choose a passage.");
@@ -394,7 +467,7 @@ public final class VideoLinks {
         JPopupMenu popup = transcript.getComponentPopupMenu();
         if (popup == null) { popup = new JPopupMenu(); transcript.setComponentPopupMenu(popup); }
         if (popup.getComponentCount() > 0) popup.addSeparator();
-        JMenuItem play = new JMenuItem("Play video here");
+        JMenuItem play = new JMenuItem("Play recording here");
         play.addActionListener(event -> {
             int offset = popupOffset;
             popupOffset = -1;

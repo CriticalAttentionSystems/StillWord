@@ -22,7 +22,7 @@ public final class RegressionSuite {
             "LocalSummaryStreamTest", "LocalSummarySectionsTest", "LocalSummaryWriterTest",
             "SummaryReviewTest", "VideoLinksTest", "ReviewFlowTest", "BrowserAiServiceTest",
             "LocalAiServiceTest", "LocalSpeechServiceTest", "AiRoutingTest",
-            "AiModelChoicesTest", "AppSupportTest");
+            "AiModelChoicesTest", "AppSupportTest", "AudioInputUiTest");
 
     private RegressionSuite() { }
 

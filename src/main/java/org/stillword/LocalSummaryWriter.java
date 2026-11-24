@@ -73,7 +73,7 @@ final class LocalSummaryWriter {
                 return completion.run(selectedSource.instructions() + LocalSummarySections.boundaryInstruction(), numbered, 1_200,
                         LocalSummarySections.responseFormat(), "low", "Finding discussion sections");
             });
-        } catch (LocalSummarySections.InvalidBoundariesException invalidBoundaries) {
+        } catch (LocalSummarySections.InvalidBoundariesException | LocalSummaryStream.OutputLimitException invalidBoundaries) {
             // A bad model boundary cannot delete source text or prevent a bounded fallback.
             interrupted();
             progress.accept("Using complete transcript passages…");
@@ -100,12 +100,25 @@ final class LocalSummaryWriter {
 
     private static String writeSection(Completion completion, Consumer<String> progress, String instruction,
                                        String source, String effort, String phase, int section, boolean hasPreferences) throws Exception {
+        boolean outputLimitRecovery = false;
         for (int attempt = 0; attempt < 2; attempt++) {
             interrupted();
-            String currentPhase = attempt == 0 ? phase : "Retrying section " + section + " after an empty or invalid AI answer";
+            String currentPhase = attempt == 0 ? phase : outputLimitRecovery
+                    ? "Retrying section " + section + " with a larger output allowance"
+                    : "Retrying section " + section + " after an empty or invalid AI answer";
             if (attempt > 0) progress.accept(currentPhase + "…");
-            String draft = completion.run(instruction + (attempt == 0 ? "" : RECOVERY), source,
-                    effort.equals("medium") ? 3_200 : 1_800, null, effort, currentPhase);
+            String draft;
+            try {
+                draft = completion.run(instruction + (attempt == 0 ? "" : RECOVERY), source,
+                        outputLimitRecovery ? 8_192 : effort.equals("medium") ? 3_200 : 1_800,
+                        null, outputLimitRecovery ? "low" : effort, currentPhase);
+            } catch (LocalSummaryStream.OutputLimitException exhausted) {
+                interrupted();
+                if (attempt == 0) { outputLimitRecovery = true; continue; }
+                throw new IOException("The local AI reached its output limit for section " + section
+                        + " even after one retry. Your transcript is unchanged; no incomplete summary was accepted. "
+                        + "Try another model or a shorter selection.", exhausted);
+            }
             interrupted();
             String response = draft == null ? "" : draft.strip();
             if (response.equals(OMIT_FILLER) || (hasPreferences && response.equals(OMIT_EXCLUDED))) return "";
